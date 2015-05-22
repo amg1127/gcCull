@@ -1,0 +1,275 @@
+#!/usr/bin/perl -w
+# Remove old transavtions from the GnuCash XML.
+# Arguments are file name and year (remove through this year)
+# After running, account balances will need to be adjusted.
+# Two passes needed, first to figure out what to remove. The second
+# to filter out the old transactions.
+#
+# Some syntax flags
+my ($inAccount, $inTransaction, $curAccount, $curTransaction);
+my ($inSplit, $curSplit);
+# Hash of accounts. Key is act:id, value is account object (hash pointer)
+my(%accounts);
+# Hash of transactions. Key is trn:id, value is transaction object (pointer)
+my(%transactions);
+my(%splits);
+# Misc global vars
+my ($i, $buffer, $skip);
+
+# Command line arguments
+my ($gcFileName) = $ARGV[0];	# Name of the GnuCash XML file to process
+my ($delYear) = $ARGV[1];	# Year to delete through
+
+# Initial values
+$inAccount = 0;
+$inTransaction = 0;
+$inSplit = 0;
+
+# First pass read the file
+open(IF, $gcFileName) || die "Can't open $gcFileName\n   ";
+while (<IF>) {
+  chomp;
+  # -- Process the account lines --
+  if (m/^\s*<gnc:account/) { # Start of a new account
+    $inAccount = 1;
+    $curAccount = {};	# New hash for new account
+    $curAccount->{id} = "-NONE-";	# GC account ID code
+    $curAccount->{origXactCnt} = 0;	# Number of transactions before cull
+    $curAccount->{newXactCnt} = 0;	# Number of transactions after cull
+    $curAccount->{type} = "-NONE-";
+    $curAccount->{name} = "-NONE-";
+    $curAccount->{description} = "-NONE-";
+    next;
+  }
+  if (m/^\s*<\/gnc:account>/) {$inAccount = 0; next}
+  if ($inAccount && m/<act:id type="guid">/) {
+    if (m/<act:id type="guid">([0-9a-zA-z]+)<\/act:id>/) {
+      $accounts{$1} = $curAccount;
+      $curAccount->{id} = $1;
+    }
+    else {die "Unexpected act:id format\n   "}
+  }
+  if ($inAccount && m/<act:type>/) {
+    if (m/<act:type>(.+)<\/act:type>/) {$curAccount->{type} = $1}
+    else {die "Unexpected act:type format\n   "}
+  }
+  if ($inAccount && m/<act:name>/) {
+    if (m/<act:name>(.+)<\/act:name>/) {
+      $curAccount->{name} = $1}
+    else {die "Unexpected act:name format\n   "}
+  }
+  if ($inAccount && m/<act:description>/) {
+    if (m/<act:description>(.+)<\/act:description>/) {
+      $curAccount->{description} = $1}
+    else {die "Unexpected act:description format\n   "}
+  }
+  # -- Process the transaction lines --
+  if (m/^\s*<gnc:transaction/) {
+    $inTransaction = 1;
+    $curTransaction = {};	# New hash for new transaction
+    $curTransaction->{id} = "-NONE-";
+    $curTransaction->{splits} = {};	# Hash of split entries
+    $curTransaction->{toDelete} = 0;	# Flag for deletion
+    $curTransaction->{year} = 0;	# Year transaction is posted
+    next;
+  }
+  if (m/^\s*<\/gnc:transaction>/) {$inTransaction = 0; next}
+  if ($inTransaction && m/<trn:id type="guid">/) {
+    if (m/<trn:id type="guid">([0-9a-zA-z]+)<\/trn:id>/) {
+      $transactions{$1} = $curTransaction;
+      $curTransaction->{id} = $1;
+    }
+    else {die "Unexpected trn:id format\n   "}
+  }
+  if ($inTransaction && m/<trn:date-posted>/) {
+    # If the date is not on this line, read the next
+    if (! m/<\/ts:date>/) { $_ = <IF>; chomp}
+    if (m/<ts:date>([0-9][0-9][0-9][0-9])\-.+<\/ts:date>/) {
+      $curTransaction->{year} = $1;}
+    else {die "Unexpected ts:date format\n   "}
+  }
+
+  # -- Process the split lines --
+  if (m/^\s*<trn:split>/) {
+    $inSplit = 1;
+    $curSplit = {};	# New hash for new split
+    $curSplit->{id} = "-NONE-";
+    $curSplit->{transaction} = $curTransaction;
+    $curSplit->{toDelete} = 0;	# Flag for deletion
+    $curSplit->{accountId} = "-NONE-";
+    next;
+  }
+  if (m/^\s*<\/trn:split>/) {$inSplit = 0; next}
+  if ($inSplit && m/<split:id type="guid">/) {
+    if (m/<split:id type="guid">([0-9a-zA-z]+)<\/split:id>/) {
+      # Add splits to the current transaction split hash
+      $curTransaction->{splits}->{$1} = $curSplit;
+      $splits{$1} = $curSplit;	# Add to global split list
+      $curSplit->{id} = $1;
+    }
+    else {die "Unexpected split:id format\n   "}
+  }
+  if ($inSplit && m/<split:account type="guid">/) {
+    if (m/<split:account type="guid">([0-9a-zA-z]+)<\/split:account>/) {
+      $curSplit->{accountId} = $1;
+      $accounts{$1}->{origXactCnt}++;	# Increment the account transactions
+    }
+    else {die "Unexpected split:account format\n   "}
+  }
+
+} # End of first read through the GnuCash file
+close(IF);
+#
+# ----------------------------------------------------------------------
+#
+
+# Copy the account transaction counts from old to new
+foreach $curAccount (values(%accounts)) {
+  $curAccount->{newXactCnt} = $curAccount->{origXactCnt};
+}
+
+# Mark deletable transactions
+$i = 0; # count deleted transactions
+foreach $curTransaction (values(%transactions)) {
+  if (&xactIsDeletable($curTransaction)) {$i++}
+}
+print "Marked $i (full) transactions for delete\n";
+
+# Dump out some account data
+open(OF, ">${gcFileName}_accounts.csv") || die "Output error";
+foreach $i (keys(%accounts)) {
+  $curAccount = $accounts{$i};
+  print OF "$curAccount->{id}\t$curAccount->{type}\t$curAccount->{name}";
+  print OF "\t$curAccount->{origXactCnt}\t$curAccount->{newXactCnt}";
+  print OF "\t$curAccount->{description}\n";
+}
+close(OF);
+
+# Dump out some split information
+open(OF, ">${gcFileName}_splits.csv") || die "Output error";
+foreach $curSplit (values(%splits)) {
+  print OF "$curSplit->{id}\t$curSplit->{accountId}\t$curSplit->{transaction}->{year}\n";
+}
+close(OF);
+#
+# ----------------------------------------------------------------------
+# Re-read the data file, this time skipping splits and transactions
+# that are marked for deletion.
+open(IF, $gcFileName) || die "Can't open $gcFileName\n   ";
+open(OF, ">new_${gcFileName}") || die "Output error";
+$skip = 0;
+$buffer = "";
+while (<IF>) {
+  chomp;
+  # Append current line to buffer
+  $buffer = $buffer."$_\n";
+
+  # -- Process the transaction lines --
+  if (m/^\s*<gnc:transaction/) {
+    $inTransaction = 1;
+    $skip = 1;
+    $buffer = "$_\n";
+    next;
+  }
+  if (m/^\s*<\/gnc:transaction>/) {
+    if ($skip == 0) {print OF "$_\n"}
+    $inTransaction = 0;
+    $skip = 0;
+    next;
+  }
+  if ($inTransaction && m/<trn:id type="guid">/) {
+    if (m/<trn:id type="guid">([0-9a-zA-z]+)<\/trn:id>/) {
+      # If this transaction is not deleted, print the buffer.
+      if ($transactions{$1}->{toDelete} == 0) {
+	print OF "$buffer";
+	$skip = 0;
+      }
+      else {$buffer=""}	# empty the buffer if not needed
+    }
+    else {die "Unexpected trn:id format\n   "}
+    next;
+  }
+
+  # -- Process the split lines, if not skiping transaction --
+  if (($skip == 0) && (m/^\s*<trn:split>/)) {
+    $inSplit = 1;
+    $skip = 2;
+    $buffer = "$_\n";
+    next;
+  }
+  if ($inSplit && m/^\s*<\/trn:split>/) {
+    if ($skip == 0) {print OF "$_\n"}
+    $inSplit = 0;
+    $skip = 0;
+    next;
+  }
+  if ($inSplit && m/<split:id type="guid">/) {
+    if (m/<split:id type="guid">([0-9a-zA-z]+)<\/split:id>/) {
+      # If this split is not deleted, print the buffer
+      if ($splits{$1}->{toDelete} == 0) {
+	print OF "$buffer";
+	$skip = 0;
+      }
+      else {$buffer=""}	# empty the buffer if not needed
+    }
+    else {die "Unexpected split:id format\n   "}
+    next;
+  }
+
+  # The default action is to copy the input to the output when not skipping
+  if ($skip == 0) {print OF "$_\n"}
+
+} # end of filtering pass through input file
+close(IF);
+close(OF);
+exit;
+#
+#
+# ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# SUBROUTINES
+
+# -- Mark deletable splits --
+# Returns non-zero id the split gets marked for delete
+# Arguments: split pointer, transaction year
+sub splitIsDeletable {
+  my ($inSplit, $xctYear) = @_;
+  my ($splAcnt) = $accounts{$inSplit->{accountId}};
+  my ($splAcntType) = $splAcnt->{type};
+  my ($rslt) = 0;
+  # Work only on splits not marked for delete
+  if ($inSplit->{toDelete} == 0) {
+    if ($xctYear != $delYear) {
+      if (($splAcntType eq "BANK") ||
+	  ($splAcntType eq "CASH") ||
+	  ($splAcntType eq "ASSET") ||
+	  ($splAcntType eq "CREDIT") ||
+	  ($splAcntType eq "EXPENSE") ||
+	  ($splAcntType eq "EQUITY") ||
+	  ($splAcntType eq "LIABILITY") ||
+	  ($splAcntType eq "INCOME")) {
+	$splAcnt->{newXactCnt}--;
+	$rslt = 1;
+	$inSplit->{toDelete} = 1;
+      }
+    }
+  }
+  #print "DEBUG: $inSplit->{id}, $splAcntType, $xctYear, $rslt\n";
+  return($rslt);
+}
+
+
+# -- Mark deletable transactions --
+sub xactIsDeletable {
+  my ($inXact) = @_;
+  my ($rslt) = 1;	# Start assuming all splits get deleted
+  my ($xactYear) = $inXact->{year};
+  my ($xSplit, $xSplits, $i);
+  $xSplits = $inXact->{splits};
+  foreach $xSplit (values(%$xSplits)) {
+    $i = &splitIsDeletable($xSplit, $xactYear);
+    $rslt = $rslt && $i;
+  }
+  if ($rslt) {$inXact->{toDelete} = 1}
+  return($rslt);
+}
