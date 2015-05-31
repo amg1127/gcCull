@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/usr/bin/perl -W
 # Remove old transavtions from the GnuCash XML.
 # Arguments are file name and year (remove through this year)
 # After running, account balances will need to be adjusted.
@@ -136,27 +136,29 @@ foreach $curTransaction (values(%transactions)) {
 print "Marked $i (full) transactions for delete\n";
 
 # Dump out some account data
-open(OF, ">${gcFileName}_accounts.csv") || die "Output error";
-foreach $i (keys(%accounts)) {
-  $curAccount = $accounts{$i};
-  print OF "$curAccount->{id}\t$curAccount->{type}\t$curAccount->{name}";
-  print OF "\t$curAccount->{origXactCnt}\t$curAccount->{newXactCnt}";
-  print OF "\t$curAccount->{description}\n";
-}
-close(OF);
+if (0) {
+    open(OF, ">${gcFileName}_accounts.csv") || die "Output error";
+    foreach $i (keys(%accounts)) {
+    $curAccount = $accounts{$i};
+    print OF "$curAccount->{id}\t$curAccount->{type}\t$curAccount->{name}";
+    print OF "\t$curAccount->{origXactCnt}\t$curAccount->{newXactCnt}";
+    print OF "\t$curAccount->{description}\n";
+    }
+    close(OF);
 
-# Dump out some split information
-open(OF, ">${gcFileName}_splits.csv") || die "Output error";
-foreach $curSplit (values(%splits)) {
-  print OF "$curSplit->{id}\t$curSplit->{accountId}\t$curSplit->{transaction}->{year}\n";
+    # Dump out some split information
+    open(OF, ">${gcFileName}_splits.csv") || die "Output error";
+    foreach $curSplit (values(%splits)) {
+    print OF "$curSplit->{id}\t$curSplit->{accountId}\t$curSplit->{transaction}->{year}\n";
+    }
+    close(OF);
 }
-close(OF);
 #
 # ----------------------------------------------------------------------
 # Re-read the data file, this time skipping splits and transactions
 # that are marked for deletion.
 open(IF, $gcFileName) || die "Can't open $gcFileName\n   ";
-open(OF, ">new_${gcFileName}") || die "Output error";
+open(OF, ">${delYear}_${gcFileName}") || die "Output error";
 $skip = 0;
 $buffer = "";
 while (<IF>) {
